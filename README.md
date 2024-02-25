@@ -1,36 +1,218 @@
-This is a [Next.js](https://nextjs.org/) project bootstrapped with [`create-next-app`](https://github.com/vercel/next.js/tree/canary/packages/create-next-app).
+# tRPC In Next.js with React Query
 
-## Getting Started
+## Inital Setup
 
-First, run the development server:
+### Add Dependencies
 
 ```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+npm install @trpc/server@next @trpc/client@next @trpc/react-query@next @trpc/next@next @tanstack/react-query@latest zod
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+### Init tRPC and Router
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+In `server/` create:
 
-This project uses [`next/font`](https://nextjs.org/docs/basic-features/font-optimization) to automatically optimize and load Inter, a custom Google Font.
+Server and Router:
 
-## Learn More
+```ts
+// trpc.ts
+import { initTRPC } from "@trpc/server";
 
-To learn more about Next.js, take a look at the following resources:
+const t = initTRPC.create();
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+export const router = t.router;
+export const publicProcedure = t.procedure;
+```
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js/) - your feedback and contributions are welcome!
+AppRouter:
 
-## Deploy on Vercel
+```ts
+// index.ts
+import { publicProcedure, router } from "./trpc";
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+export const appRouter = router({
+	getTodos: publicProcedure.query(async () => {
+		return [10, 20, 30, 40];
+	}),
+});
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/deployment) for more details.
+export type AppRouter = typeof appRouter;
+```
+
+### tRPC Next.js Instance
+
+In `app/api/trpc/[trpc]` create the instance.
+
+```ts
+// route.ts
+import { fetchRequestHandler } from "@trpc/server/adapters/fetch";
+import { appRouter } from "@/server";
+
+const handler = (req: Request) =>
+	fetchRequestHandler({
+		endpoint: "/api/trpc",
+		req,
+		router: appRouter,
+		createContext: () => ({}),
+	});
+
+export { handler as GET, handler as POST };
+```
+
+### Create tRPC React Client
+
+In `app/_trpc` create
+
+Client:
+
+```ts
+// client.ts
+import { AppRouter } from "@/server";
+import { createTRPCReact } from "@trpc/react-query";
+
+export const trpc = createTRPCReact<AppRouter>({});
+```
+
+Provider:
+
+```tsx
+// Provider.tsx
+"use client";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { ReactNode, useState } from "react";
+import { trpc } from "./client";
+import { httpBatchLink } from "@trpc/react-query";
+
+export default function Provider({ children }: { children: ReactNode }) {
+	const [queryClient] = useState(() => new QueryClient());
+	const [trpcClient] = useState(() =>
+		trpc.createClient({
+			links: [
+				httpBatchLink({
+					url: "http://localhost:3000/api/trpc",
+				}),
+			],
+		})
+	);
+
+	return (
+		<trpc.Provider client={trpcClient} queryClient={queryClient}>
+			<QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
+		</trpc.Provider>
+	);
+}
+```
+
+### Apply Provider:
+
+```tsx
+// layout.tsx
+...
+export default function RootLayout({
+	children,
+}: Readonly<{
+	children: React.ReactNode;
+}>) {
+	return (
+		<html lang="en">
+			<body className={inter.className}>
+				<Provider>{children}</Provider>
+			</body>
+		</html>
+	);
+}
+```
+
+## Usage Component
+
+Take a example of a component usage w/tRPC:
+
+```tsx
+// TodoList.tsx
+"use client";
+import { trpc } from "@/app/_trpc/client";
+
+export default function TodoList() {
+	const getTodos = trpc.getTodos.useQuery();
+
+	return (
+		<div>
+			<div>{JSON.stringify(getTodos.data)}</div>
+		</div>
+	);
+}
+```
+
+## Drizzle Setup
+
+### Add Dependencies
+
+```bash
+npm install drizzle-orm better-sqlite3 drizzle-kit
+```
+
+```bash
+npm install @types/better-sqlite3 --save-dev
+```
+
+### Create Schema
+
+```ts
+// db/schema.ts
+import { integer, sqliteTable, text } from "drizzle-orm/sqlite-core";
+
+export const todos = sqliteTable("todos", {
+	id: integer("id").primaryKey(),
+	content: text("content"),
+	done: integer("done"),
+});
+```
+
+### Create Drizzle Config
+
+```ts
+// drizzle.config.ts
+import { Config } from "drizzle-kit";
+
+export default {
+	schema: "../db/schema.ts",
+	out: "./drizzle",
+	driver: "better-sqlite",
+	dbCredentials: {
+		url: "sqlite.db",
+	},
+} satisfies Config;
+```
+
+### Generate Migrations
+
+```bash
+npm drizzle-kit generate:sqlite
+```
+
+### Use Drizzle from tRPC
+
+Change `server/index.ts`:
+
+```ts
+import { drizzle } from "drizzle-orm/better-sqlite3";
+import { migrate } from "drizzle-orm/better-sqlite3/migrator";
+import Database from "better-sqlite3";
+
+import { publicProcedure, router } from "./trpc";
+
+import { todos } from "@/db/schema";
+
+const sqlite = new Database("sqlite.db");
+const db = drizzle(sqlite);
+
+migrate(db, { migrationsFolder: "drizzle" });
+
+export const appRouter = router({
+	getTodos: publicProcedure.query(async () => {
+		return await db.select().from(todos).all();
+	}),
+});
+
+export type AppRouter = typeof appRouter;
+```
